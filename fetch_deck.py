@@ -125,6 +125,16 @@ def search_moxfield_decks(
 
 
 def print_search_results(results):
+    total_results = results.get("totalResults")
+    total_pages = results.get("totalPages")
+    page_number = results.get("pageNumber")
+    page_size = results.get("pageSize")
+    print(
+        f"Found {total_results} decks across {total_pages} pages "
+        f"(page {page_number} of {total_pages}, {page_size} per page)"
+    )
+    print()
+
     for deck in results["data"]:
         print(f"Name: {deck.get('name')}")
         print(f"Format: {deck.get('format')}")
