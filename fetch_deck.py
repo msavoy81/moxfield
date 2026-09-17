@@ -42,6 +42,97 @@ def get_moxfield_deck(deck_id_or_url):
     return response.json()
 
 
+def lookup_commander_card_id(commander_name):
+    url = "https://api2.moxfield.com/v3/cards/named"
+    # No Content-Type header here: this endpoint tries to parse the request
+    # body as JSON when the header is present, and fails on the empty GET body.
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    }
+    params = {
+        "q": commander_name,
+        "count": 10,
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Failed to reach Moxfield: {e}")
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Failed to look up commander {commander_name!r}: "
+            f"HTTP {response.status_code} - {response.text}"
+        )
+
+    cards = response.json().get("cards") or []
+    matches = [
+        card
+        for card in cards
+        if card.get("name", "").lower() == commander_name.lower()
+        and card.get("set_type") != "memorabilia"
+    ]
+
+    if not matches:
+        raise RuntimeError(f"No commander found with name {commander_name!r}")
+
+    return matches[0]["id"]
+
+
+def search_moxfield_decks(
+    commander_name,
+    theme=None,
+    min_bracket=None,
+    max_bracket=None,
+    page_size=20,
+    page_number=1,
+):
+    commander_card_id = lookup_commander_card_id(commander_name)
+
+    url = "https://api2.moxfield.com/v2/decks/search"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    params = {
+        "commanderCardId": commander_card_id,
+        "pageNumber": page_number,
+        "pageSize": page_size,
+        "sortType": "updated",
+        "sortDirection": "descending",
+    }
+    if theme is not None:
+        params["hubName"] = theme
+    if min_bracket is not None:
+        params["minBracket"] = min_bracket
+    if max_bracket is not None:
+        params["maxBracket"] = max_bracket
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Failed to reach Moxfield: {e}")
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Failed to search decks for commander {commander_name!r}: "
+            f"HTTP {response.status_code} - {response.text}"
+        )
+
+    return response.json()
+
+
+def print_search_results(results):
+    for deck in results["data"]:
+        print(f"Name: {deck.get('name')}")
+        print(f"Format: {deck.get('format')}")
+        print(f"Views: {deck.get('viewCount')}  Likes: {deck.get('likeCount')}")
+        print(f"URL: https://moxfield.com/decks/{deck.get('publicId')}")
+        print()
+
+
 def print_deck(deck):
     print(f"Name: {deck.get('name')}")
     print(f"Format: {deck.get('format')}")
@@ -65,6 +156,32 @@ def print_deck(deck):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--search":
+        commander_name = sys.argv[2]
+
+        theme = None
+        bracket = None
+        args = sys.argv[3:]
+        i = 0
+        while i < len(args):
+            if args[i] == "--theme":
+                theme = args[i + 1]
+                i += 2
+            elif args[i] == "--bracket":
+                bracket = int(args[i + 1])
+                i += 2
+            else:
+                i += 1
+
+        results = search_moxfield_decks(
+            commander_name,
+            theme=theme,
+            min_bracket=bracket,
+            max_bracket=bracket,
+        )
+        print_search_results(results)
+        return
+
     deck_id_or_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DECK_ID
     deck = get_moxfield_deck(deck_id_or_url)
     print_deck(deck)
