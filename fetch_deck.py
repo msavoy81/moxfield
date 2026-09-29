@@ -80,6 +80,9 @@ def lookup_commander_card_id(commander_name):
     return matches[0]["id"]
 
 
+VALID_SORT_BY = ("updated", "likes", "views")
+
+
 def search_decks(
     commander_name=None,
     fmt=None,
@@ -88,7 +91,13 @@ def search_decks(
     max_bracket=None,
     page_size=20,
     page_number=1,
+    sort_by="updated",
 ):
+    if sort_by not in VALID_SORT_BY:
+        raise ValueError(
+            f"Invalid sort_by {sort_by!r}: must be one of {VALID_SORT_BY}"
+        )
+
     url = "https://api2.moxfield.com/v2/decks/search"
     headers = {
         "User-Agent": USER_AGENT,
@@ -98,7 +107,7 @@ def search_decks(
     params = {
         "pageNumber": page_number,
         "pageSize": page_size,
-        "sortType": "updated",
+        "sortType": sort_by,
         "sortDirection": "descending",
     }
 
@@ -187,6 +196,7 @@ def main():
         theme = None
         bracket = None
         fmt = None
+        sort_by = "updated"
         i = 0
         while i < len(args):
             if args[i] == "--theme":
@@ -198,6 +208,9 @@ def main():
             elif args[i] == "--format":
                 fmt = args[i + 1]
                 i += 2
+            elif args[i] == "--sort":
+                sort_by = args[i + 1]
+                i += 2
             else:
                 i += 1
 
@@ -207,6 +220,7 @@ def main():
             theme=theme,
             min_bracket=bracket,
             max_bracket=bracket,
+            sort_by=sort_by,
         )
         print_search_results(results, commander_name=commander_name)
         return
