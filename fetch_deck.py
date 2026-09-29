@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -82,8 +83,14 @@ def lookup_commander_card_id(commander_name):
 
 VALID_SORT_BY = ("updated", "likes", "views")
 
+# Used only by the updated_within_days path in search_decks: how many decks to
+# page through (sorted by most-recently-updated) before giving up, and how
+# many results to request per page while doing so.
+RECENT_SCAN_CAP = 500
+RECENT_SCAN_PAGE_SIZE = 100
 
-def search_decks(
+
+def _fetch_search_page(
     commander_name=None,
     fmt=None,
     theme=None,
@@ -137,6 +144,103 @@ def search_decks(
         )
 
     return response.json()
+
+
+def _parse_utc(timestamp):
+    if not timestamp:
+        return None
+    return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
+
+def _search_decks_recent(
+    commander_name, fmt, theme, min_bracket, max_bracket, updated_within_days
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=updated_within_days)
+
+    scanned = []
+    page_number = 1
+    while len(scanned) < RECENT_SCAN_CAP:
+        page = _fetch_search_page(
+            commander_name=commander_name,
+            fmt=fmt,
+            theme=theme,
+            min_bracket=min_bracket,
+            max_bracket=max_bracket,
+            page_size=RECENT_SCAN_PAGE_SIZE,
+            page_number=page_number,
+            sort_by="updated",
+        )
+        data = page.get("data") or []
+        if not data:
+            break
+        scanned.extend(data)
+
+        oldest_in_page = _parse_utc(data[-1].get("lastUpdatedAtUtc"))
+        if oldest_in_page is not None and oldest_in_page < cutoff:
+            break
+
+        total_pages = page.get("totalPages")
+        if total_pages is not None and page_number >= total_pages:
+            break
+        page_number += 1
+
+    scanned = scanned[:RECENT_SCAN_CAP]
+
+    kept = [
+        deck
+        for deck in scanned
+        if (updated := _parse_utc(deck.get("lastUpdatedAtUtc"))) is not None
+        and updated >= cutoff
+    ]
+    kept.sort(key=lambda d: (d.get("likeCount", 0), d.get("viewCount", 0)), reverse=True)
+
+    return {
+        "data": kept,
+        "totalResults": len(kept),
+        "totalPages": 1,
+        "pageNumber": 1,
+        "pageSize": len(kept),
+        "totalScanned": len(scanned),
+        "totalPassedFilter": len(kept),
+    }
+
+
+def search_decks(
+    commander_name=None,
+    fmt=None,
+    theme=None,
+    min_bracket=None,
+    max_bracket=None,
+    page_size=20,
+    page_number=1,
+    sort_by="updated",
+    updated_within_days=None,
+):
+    """Search Moxfield decks.
+
+    If updated_within_days is set, page_size/page_number/sort_by are ignored:
+    results are instead paged through sorted by most-recently-updated (up to
+    RECENT_SCAN_CAP decks scanned), filtered to decks updated within that many
+    days, and the surviving decks are re-sorted by likes (views as
+    tiebreaker). The returned dict then also carries totalScanned and
+    totalPassedFilter. Every deck dict already includes viewCount from the
+    Moxfield API.
+    """
+    if updated_within_days is not None:
+        return _search_decks_recent(
+            commander_name, fmt, theme, min_bracket, max_bracket, updated_within_days
+        )
+
+    return _fetch_search_page(
+        commander_name=commander_name,
+        fmt=fmt,
+        theme=theme,
+        min_bracket=min_bracket,
+        max_bracket=max_bracket,
+        page_size=page_size,
+        page_number=page_number,
+        sort_by=sort_by,
+    )
 
 
 def print_search_results(results, commander_name=None):
