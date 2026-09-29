@@ -80,16 +80,15 @@ def lookup_commander_card_id(commander_name):
     return matches[0]["id"]
 
 
-def search_moxfield_decks(
-    commander_name,
+def search_decks(
+    commander_name=None,
+    fmt=None,
     theme=None,
     min_bracket=None,
     max_bracket=None,
     page_size=20,
     page_number=1,
 ):
-    commander_card_id = lookup_commander_card_id(commander_name)
-
     url = "https://api2.moxfield.com/v2/decks/search"
     headers = {
         "User-Agent": USER_AGENT,
@@ -97,18 +96,24 @@ def search_moxfield_decks(
         "Content-Type": "application/json; charset=utf-8",
     }
     params = {
-        "commanderCardId": commander_card_id,
         "pageNumber": page_number,
         "pageSize": page_size,
         "sortType": "updated",
         "sortDirection": "descending",
     }
+
+    if commander_name is not None:
+        params["commanderCardId"] = lookup_commander_card_id(commander_name)
+    if fmt is not None:
+        params["fmt"] = fmt
     if theme is not None:
         params["hubName"] = theme
-    if min_bracket is not None:
-        params["minBracket"] = min_bracket
-    if max_bracket is not None:
-        params["maxBracket"] = max_bracket
+    # Bracket doesn't apply to Standard, so skip it even if the caller passed one.
+    if fmt != "standard":
+        if min_bracket is not None:
+            params["minBracket"] = min_bracket
+        if max_bracket is not None:
+            params["maxBracket"] = max_bracket
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=15)
@@ -116,15 +121,16 @@ def search_moxfield_decks(
         raise RuntimeError(f"Failed to reach Moxfield: {e}")
 
     if response.status_code != 200:
+        target = f"commander {commander_name!r}" if commander_name else f"format {fmt!r}"
         raise RuntimeError(
-            f"Failed to search decks for commander {commander_name!r}: "
+            f"Failed to search decks for {target}: "
             f"HTTP {response.status_code} - {response.text}"
         )
 
     return response.json()
 
 
-def print_search_results(results):
+def print_search_results(results, commander_name=None):
     total_results = results.get("totalResults")
     total_pages = results.get("totalPages")
     page_number = results.get("pageNumber")
@@ -138,6 +144,10 @@ def print_search_results(results):
     for deck in results["data"]:
         print(f"Name: {deck.get('name')}")
         print(f"Format: {deck.get('format')}")
+        # The search endpoint never populates a deck's "commanders" field, so we
+        # can only report the commander the search itself was scoped to.
+        if commander_name:
+            print(f"Commander(s): {commander_name}")
         print(f"Views: {deck.get('viewCount')}  Likes: {deck.get('likeCount')}")
         print(f"URL: https://moxfield.com/decks/{deck.get('publicId')}")
         print()
@@ -167,11 +177,16 @@ def print_deck(deck):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--search":
-        commander_name = sys.argv[2]
+        args = sys.argv[2:]
+
+        commander_name = None
+        if args and not args[0].startswith("--"):
+            commander_name = args[0]
+            args = args[1:]
 
         theme = None
         bracket = None
-        args = sys.argv[3:]
+        fmt = None
         i = 0
         while i < len(args):
             if args[i] == "--theme":
@@ -180,16 +195,20 @@ def main():
             elif args[i] == "--bracket":
                 bracket = int(args[i + 1])
                 i += 2
+            elif args[i] == "--format":
+                fmt = args[i + 1]
+                i += 2
             else:
                 i += 1
 
-        results = search_moxfield_decks(
-            commander_name,
+        results = search_decks(
+            commander_name=commander_name,
+            fmt=fmt,
             theme=theme,
             min_bracket=bracket,
             max_bracket=bracket,
         )
-        print_search_results(results)
+        print_search_results(results, commander_name=commander_name)
         return
 
     deck_id_or_url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DECK_ID
