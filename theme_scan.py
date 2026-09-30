@@ -17,6 +17,7 @@ TOP_DECKS_PER_COMMANDER = 5
 TOP_CARDS = 60
 UPDATED_WITHIN_DAYS = 90
 DEFAULT_FORMAT = "commander"
+DUPLICATE_OVERLAP_THRESHOLD = 0.95
 
 # Matches a card line from export_deck.py/arena_import.py's enriched output,
 # e.g. "1x Katara, Waterbending Master — {1}{U} — MV 2 — TLE". Oracle text
@@ -83,6 +84,70 @@ def load_my_cards(my_deck_arg):
     return deck_card_names(get_moxfield_deck(my_deck_arg))
 
 
+def jaccard_similarity(set_a, set_b):
+    union = set_a | set_b
+    if not union:
+        return 1.0
+    return len(set_a & set_b) / len(union)
+
+
+def dedupe_decks(fetched):
+    """fetched: list of (commander, deck) pairs, in fetch order.
+
+    Decks whose card sets overlap by >= DUPLICATE_OVERLAP_THRESHOLD are
+    merged into a single cluster (union-find over all pairs, not just
+    adjacent ones, so A~B~C merges into one cluster even if A and C alone
+    fall just under the threshold).
+
+    Returns (clusters, duplicate_notes):
+      clusters: list of (representative_deck, commanders_set) - one entry
+        per cluster, to aggregate over instead of every fetched deck.
+      duplicate_notes: human-readable strings describing each merge, for
+        the output header.
+    """
+    n = len(fetched)
+    card_sets = [deck_card_names(deck) for _, deck in fetched]
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if jaccard_similarity(card_sets[i], card_sets[j]) >= DUPLICATE_OVERLAP_THRESHOLD:
+                union(i, j)
+
+    members_by_root = {}
+    for i in range(n):
+        members_by_root.setdefault(find(i), []).append(i)
+
+    def deck_label(i):
+        deck = fetched[i][1]
+        return f"{deck.get('name', 'Unknown')} ({deck.get('publicId', '?')})"
+
+    clusters = []
+    duplicate_notes = []
+    for members in members_by_root.values():
+        rep_idx = min(members)
+        rep_deck = fetched[rep_idx][1]
+        commanders_for_cluster = {fetched[i][0] for i in members}
+        clusters.append((rep_deck, commanders_for_cluster))
+
+        if len(members) > 1:
+            others = [deck_label(i) for i in sorted(members) if i != rep_idx]
+            duplicate_notes.append(f"{deck_label(rep_idx)} duplicates: {', '.join(others)}")
+
+    return clusters, duplicate_notes
+
+
 def scan_commander(commander_name, fmt, bracket):
     results = search_decks(
         commander_name=commander_name,
@@ -130,28 +195,32 @@ def main():
 
     my_cards = load_my_cards(my_deck_arg)
 
-    card_stats = {}
+    fetched = []
     commander_deck_counts = []
 
     for commander in commanders:
         decks = scan_commander(commander, fmt, bracket)
         commander_deck_counts.append((commander, len(decks)))
+        fetched.extend((commander, deck) for deck in decks)
 
-        for deck in decks:
-            seen_in_this_deck = set()
-            for entry in (deck.get("mainboard") or {}).values():
-                card = entry.get("card", {})
-                name = card.get("name", "")
-                if not name or name in seen_in_this_deck:
-                    continue
-                seen_in_this_deck.add(name)
-                if is_basic_land(card.get("type_line", "")):
-                    continue
-                if name in my_cards:
-                    continue
-                stats = card_stats.setdefault(name, {"count": 0, "commanders": set()})
-                stats["count"] += 1
-                stats["commanders"].add(commander)
+    clusters, duplicate_notes = dedupe_decks(fetched)
+
+    card_stats = {}
+    for deck, commanders_for_deck in clusters:
+        seen_in_this_deck = set()
+        for entry in (deck.get("mainboard") or {}).values():
+            card = entry.get("card", {})
+            name = card.get("name", "")
+            if not name or name in seen_in_this_deck:
+                continue
+            seen_in_this_deck.add(name)
+            if is_basic_land(card.get("type_line", "")):
+                continue
+            if name in my_cards:
+                continue
+            stats = card_stats.setdefault(name, {"count": 0, "commanders": set()})
+            stats["count"] += 1
+            stats["commanders"] |= commanders_for_deck
 
     ranked = sorted(
         card_stats.items(),
@@ -174,6 +243,11 @@ def main():
     lines = []
     for commander, count in commander_deck_counts:
         lines.append(f"{commander}: {count} decks")
+    if duplicate_notes:
+        lines.append("")
+        lines.append(f"Duplicate decks merged (>={DUPLICATE_OVERLAP_THRESHOLD:.0%} card overlap):")
+        for note in duplicate_notes:
+            lines.append(f"  {note}")
     lines.append("")
     lines.append(fmt_row(*header))
     lines.append(fmt_row("-" * w0, "-" * w1, "-" * w2))
