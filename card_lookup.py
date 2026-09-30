@@ -12,35 +12,47 @@ OUTPUT_PATH = os.path.expanduser(
     "~/Documents/AI Projects/moxfield-exports/card_lookup.txt"
 )
 
-SCRYFALL_MIN_INTERVAL = 0.1
+SCRYFALL_MIN_INTERVAL = 0.2
 _last_scryfall_call = 0.0
+
+MAX_RATE_LIMIT_RETRIES = 3
 
 
 def fetch_scryfall_card(name):
     global _last_scryfall_call
 
-    elapsed = time.monotonic() - _last_scryfall_call
-    if elapsed < SCRYFALL_MIN_INTERVAL:
-        time.sleep(SCRYFALL_MIN_INTERVAL - elapsed)
-
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     params = {"fuzzy": name}
-    try:
-        response = requests.get(
-            "https://api.scryfall.com/cards/named",
-            headers=headers,
-            params=params,
-            timeout=15,
-        )
-    finally:
-        _last_scryfall_call = time.monotonic()
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Scryfall lookup failed for {name!r}: "
-            f"HTTP {response.status_code} - {response.text}"
-        )
-    return response.json()
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        elapsed = time.monotonic() - _last_scryfall_call
+        if elapsed < SCRYFALL_MIN_INTERVAL:
+            time.sleep(SCRYFALL_MIN_INTERVAL - elapsed)
+
+        try:
+            response = requests.get(
+                "https://api.scryfall.com/cards/named",
+                headers=headers,
+                params=params,
+                timeout=15,
+            )
+        finally:
+            _last_scryfall_call = time.monotonic()
+
+        if response.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+            # Honor Scryfall's cooldown instead of hammering it with the next
+            # card's request, which would just extend the block further.
+            retry_after = int(response.headers.get("Retry-After", 60))
+            time.sleep(retry_after + 1)
+            _last_scryfall_call = time.monotonic()
+            continue
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Scryfall lookup failed for {name!r}: "
+                f"HTTP {response.status_code} - {response.text}"
+            )
+        return response.json()
 
 
 def format_mana_value(cmc):
