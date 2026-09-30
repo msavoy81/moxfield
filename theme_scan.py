@@ -3,6 +3,7 @@
 theme but missing from a reference deck.
 """
 import os
+import re
 import sys
 import time
 
@@ -10,14 +11,17 @@ import requests
 
 from fetch_deck import get_moxfield_deck, search_decks
 
-OUTPUT_PATH = os.path.expanduser(
-    "~/Documents/AI Projects/moxfield-exports/theme_scan_elenda.txt"
-)
+OUTPUT_DIR = os.path.expanduser("~/Documents/AI Projects/moxfield-exports")
 
 TOP_DECKS_PER_COMMANDER = 5
 TOP_CARDS = 60
-BRACKET = 4
 UPDATED_WITHIN_DAYS = 90
+DEFAULT_FORMAT = "commander"
+
+# Matches a card line from export_deck.py/arena_import.py's enriched output,
+# e.g. "1x Katara, Waterbending Master — {1}{U} — MV 2 — TLE". Oracle text
+# lines are indented, so they never match this.
+CARD_LINE_RE = re.compile(r"^(\d+)x\s+(.+?)\s+—\s+")
 
 MOXFIELD_MIN_INTERVAL = 1.0
 _last_moxfield_call = 0.0
@@ -60,33 +64,77 @@ def deck_card_names(deck):
     return names
 
 
-def scan_commander(commander_name):
+def read_enriched_deck_file(path):
+    """Read card names out of an export_deck.py/arena_import.py output file."""
+    names = set()
+    with open(path) as f:
+        for line in f:
+            if line.startswith(" "):
+                continue  # oracle text / extra faces are indented
+            match = CARD_LINE_RE.match(line)
+            if match:
+                names.add(match.group(2).strip())
+    return names
+
+
+def load_my_cards(my_deck_arg):
+    if os.path.isfile(my_deck_arg):
+        return read_enriched_deck_file(my_deck_arg)
+    return deck_card_names(get_moxfield_deck(my_deck_arg))
+
+
+def scan_commander(commander_name, fmt, bracket):
     results = search_decks(
         commander_name=commander_name,
-        min_bracket=BRACKET,
-        max_bracket=BRACKET,
+        fmt=fmt,
+        min_bracket=bracket,
+        max_bracket=bracket,
         updated_within_days=UPDATED_WITHIN_DAYS,
     )
     top_decks = results.get("data", [])[:TOP_DECKS_PER_COMMANDER]
     return [get_moxfield_deck(summary["publicId"]) for summary in top_decks]
 
 
+def parse_args(argv):
+    """Split argv into (positional, fmt, bracket)."""
+    positional = []
+    fmt = DEFAULT_FORMAT
+    bracket = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--format":
+            fmt = argv[i + 1]
+            i += 2
+        elif argv[i] == "--bracket":
+            bracket = int(argv[i + 1])
+            i += 2
+        else:
+            positional.append(argv[i])
+            i += 1
+    return positional, fmt, bracket
+
+
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} MY_DECK_ID_OR_URL COMMANDER_NAME [COMMANDER_NAME ...]")
+    positional, fmt, bracket = parse_args(sys.argv[1:])
+
+    if len(positional) < 3:
+        print(
+            f"Usage: {sys.argv[0]} OUTPUT_FILENAME MY_DECK_ID_OR_PATH "
+            "COMMANDER_NAME [COMMANDER_NAME ...] [--format FMT] [--bracket N]"
+        )
         sys.exit(1)
 
-    my_deck_id = sys.argv[1]
-    commanders = sys.argv[2:]
+    output_filename, my_deck_arg, *commanders = positional
+    if not output_filename.endswith(".txt"):
+        output_filename += ".txt"
 
-    my_deck = get_moxfield_deck(my_deck_id)
-    my_cards = deck_card_names(my_deck)
+    my_cards = load_my_cards(my_deck_arg)
 
     card_stats = {}
     commander_deck_counts = []
 
     for commander in commanders:
-        decks = scan_commander(commander)
+        decks = scan_commander(commander, fmt, bracket)
         commander_deck_counts.append((commander, len(decks)))
 
         for deck in decks:
@@ -120,22 +168,23 @@ def main():
     w1 = max(len(r[1]) for r in rows + [header])
     w2 = max(len(r[2]) for r in rows + [header])
 
-    def fmt(a, b, c):
+    def fmt_row(a, b, c):
         return f"{a:<{w0}}  {b:<{w1}}  {c:<{w2}}"
 
     lines = []
     for commander, count in commander_deck_counts:
         lines.append(f"{commander}: {count} decks")
     lines.append("")
-    lines.append(fmt(*header))
-    lines.append(fmt("-" * w0, "-" * w1, "-" * w2))
+    lines.append(fmt_row(*header))
+    lines.append(fmt_row("-" * w0, "-" * w1, "-" * w2))
     for row in rows:
-        lines.append(fmt(*row))
+        lines.append(fmt_row(*row))
 
     output = "\n".join(lines) + "\n"
 
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    with open(OUTPUT_PATH, "w") as f:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    out_path = os.path.join(OUTPUT_DIR, output_filename)
+    with open(out_path, "w") as f:
         f.write(output)
 
     print(output, end="")
