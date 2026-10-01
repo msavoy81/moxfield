@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Aggregate the MTG Arena Standard BO1 metagame from AetherHub, cross-check
-meta share against MTGGoldfish, and flag archetypes buildable within a rare
-wildcard budget.
+meta share against MTGGoldfish, and count the rare/mythic wildcards each
+archetype needs.
 
 Reuses fetch_scryfall_card() from card_lookup.py for Scryfall rarity lookups
 instead of writing a new Scryfall client.
 """
+import argparse
 import csv
 import os
 import re
@@ -21,8 +22,7 @@ from fetch_deck import USER_AGENT
 
 OUTPUT_DIR = os.path.expanduser("~/Documents/AI Projects/moxfield-exports")
 
-TOP_N = 15
-RARE_WILDCARD_BUDGET = 10
+TOP_N = 25
 
 # https://magic.wizards.com/en/news/mtg-arena/reality-fracture-mastery-details
 REALITY_FRACTURE_ARENA_RELEASE = date(2026, 9, 29)
@@ -274,7 +274,7 @@ def write_arena_import(path, archetype_name, main_60):
 def fetch_archetype_detail(archetype, today, page_cache, scryfall_cache, failed_lookups, blocked):
     """Fetch and parse an archetype's deck page, mutating `archetype` in
     place with main_60/variations/breakdown/wildcard counts. Reuses
-    page_cache so an archetype found in both the top-15 scan and the
+    page_cache so an archetype found in both the top-N scan and the
     four/five-color scan is only fetched once."""
     if blocked["aetherhub"]:
         return
@@ -304,6 +304,11 @@ def fetch_archetype_detail(archetype, today, page_cache, scryfall_cache, failed_
     post_games = post_wins + post_losses
     post_win_rate = (post_wins / post_games * 100) if post_games else None
 
+    all_wins = sum(v["wins"] for v in variations)
+    all_losses = sum(v["losses"] for v in variations)
+    all_games = all_wins + all_losses
+    all_win_rate = (all_wins / all_games * 100) if all_games else None
+
     rares_needed = 0
     mythics_needed = 0
     for card in main_60:
@@ -320,13 +325,16 @@ def fetch_archetype_detail(archetype, today, page_cache, scryfall_cache, failed_
     archetype["main_60"] = main_60
     archetype["variations"] = variations
     archetype["breakdown"] = breakdown
+    archetype["all_variations_wins"] = all_wins
+    archetype["all_variations_losses"] = all_losses
+    archetype["all_variations_games"] = all_games
+    archetype["all_variations_win_rate"] = all_win_rate
     archetype["post_release_wins"] = post_wins
     archetype["post_release_losses"] = post_losses
     archetype["post_release_games"] = post_games
     archetype["post_release_win_rate"] = post_win_rate
     archetype["rares_needed"] = rares_needed
     archetype["mythics_needed"] = mythics_needed
-    archetype["within_rare_budget"] = rares_needed <= RARE_WILDCARD_BUDGET
 
 
 def parse_goldfish_overview(html):
@@ -367,10 +375,33 @@ def parse_goldfish_overview(html):
     return archetypes
 
 
+def format_win_rate(win_rate):
+    return f"{win_rate:.1f}" if win_rate is not None else ""
+
+
+def deck_id(url):
+    m = re.search(r"-(\d+)/?$", url)
+    return m.group(1) if m else ""
+
+
+def read_previous_urls(path):
+    with open(path, newline="") as f:
+        return {row["aetherhub_url"] for row in csv.DictReader(f)}
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--tag", default="",
+                        help="label added to the CSV filenames, e.g. v2 -> standard_bo1_meta_v2_DATE.csv")
+    parser.add_argument("--previous-csv",
+                        help="meta CSV from an earlier run; skip Arena import files for archetypes already in it")
+    args = parser.parse_args()
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     today = date.today()
     date_stamp = today.isoformat()
+    tag = f"{args.tag}_" if args.tag else ""
+    previous_urls = read_previous_urls(args.previous_csv) if args.previous_csv else set()
     blocked = {"aetherhub": None, "goldfish": None}
     created_files = []
 
@@ -394,7 +425,7 @@ def main():
     for a in four_five_color:
         print(f"  {a['meta_pct']:5.2f}%  {a['name']:20s} colors={a['colors']}  {a['url']}")
 
-    print("\n=== Step 2b/2c/2d: fetching each top-15 deck page ===")
+    print(f"\n=== Step 2b/2c/2d: fetching each top-{TOP_N} deck page ===")
     page_cache = {}
     scryfall_cache = {}
     failed_lookups = []
@@ -416,46 +447,50 @@ def main():
             print(f"  {name}: {err}")
 
     print("\n=== Step 2f: writing per-archetype summary CSV and Arena import files ===")
-    csv_path = os.path.join(OUTPUT_DIR, f"standard_bo1_meta_{date_stamp}.csv")
+    csv_path = os.path.join(OUTPUT_DIR, f"standard_bo1_meta_{tag}{date_stamp}.csv")
     fieldnames = [
         "archetype", "aetherhub_url", "meta_share_pct", "match_count",
+        "all_variations_win_rate_pct", "all_variations_games",
+        "all_variations_wins", "all_variations_losses",
+        "post_release_win_rate_pct", "post_release_games",
+        "post_release_wins", "post_release_losses",
         "commons", "uncommons", "rares", "mythics",
-        "rares_needed", "mythics_needed", "within_rare_budget",
-        "post_release_games", "post_release_wins", "post_release_losses",
-        "post_release_win_rate_pct",
+        "rares_needed", "mythics_needed",
     ]
-    seen_slugs = {}
+    fetched = [a for a in top_archetypes if "main_60" in a]
+    # Highest all-variations win rate first; archetypes with no games last.
+    fetched.sort(key=lambda a: (a["all_variations_win_rate"] is None,
+                                -(a["all_variations_win_rate"] or 0)))
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for archetype in top_archetypes:
-            if "main_60" not in archetype:
-                continue
+        for archetype in fetched:
             writer.writerow({
                 "archetype": archetype["name"],
                 "aetherhub_url": archetype["url"],
                 "meta_share_pct": archetype["meta_pct"],
                 "match_count": archetype["matches"],
+                "all_variations_win_rate_pct": format_win_rate(archetype["all_variations_win_rate"]),
+                "all_variations_games": archetype["all_variations_games"],
+                "all_variations_wins": archetype["all_variations_wins"],
+                "all_variations_losses": archetype["all_variations_losses"],
+                "post_release_win_rate_pct": format_win_rate(archetype["post_release_win_rate"]),
+                "post_release_games": archetype["post_release_games"],
+                "post_release_wins": archetype["post_release_wins"],
+                "post_release_losses": archetype["post_release_losses"],
                 "commons": archetype["rarities"]["common"],
                 "uncommons": archetype["rarities"]["uncommon"],
                 "rares": archetype["rarities"]["rare"],
                 "mythics": archetype["rarities"]["mythic"],
                 "rares_needed": archetype["rares_needed"],
                 "mythics_needed": archetype["mythics_needed"],
-                "within_rare_budget": archetype["within_rare_budget"],
-                "post_release_games": archetype["post_release_games"],
-                "post_release_wins": archetype["post_release_wins"],
-                "post_release_losses": archetype["post_release_losses"],
-                "post_release_win_rate_pct": (
-                    f"{archetype['post_release_win_rate']:.1f}"
-                    if archetype["post_release_win_rate"] is not None else ""
-                ),
             })
 
-            slug = slugify(archetype["name"])
-            seen_slugs[slug] = seen_slugs.get(slug, 0) + 1
-            if seen_slugs[slug] > 1:
-                slug = f"{slug}-{seen_slugs[slug]}"
+            if archetype["url"] in previous_urls:
+                continue
+            # Name by AetherHub deck ID so files stay stable across runs and
+            # never overwrite an earlier run's slug-numbered files.
+            slug = f"{slugify(archetype['name'])}-{deck_id(archetype['url'])}"
             txt_path = os.path.join(OUTPUT_DIR, f"standard_bo1_{slug}_{date_stamp}.txt")
             write_arena_import(txt_path, archetype["name"], archetype["main_60"])
             created_files.append(txt_path)
@@ -470,7 +505,7 @@ def main():
         for a in goldfish_archetypes:
             print(f"  {a['meta_pct']:5.2f}%  {a['name']:25s} decks={a['deck_count']:4d}  {a['url']}")
 
-        goldfish_csv = os.path.join(OUTPUT_DIR, f"standard_goldfish_{date_stamp}.csv")
+        goldfish_csv = os.path.join(OUTPUT_DIR, f"standard_goldfish_{tag}{date_stamp}.csv")
         with open(goldfish_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["archetype", "url", "meta_share_pct", "deck_count"])
             writer.writeheader()

@@ -101,7 +101,7 @@ def main():
         entries = groups[t]
         if not entries:
             continue
-        label = "Lands" if t == "Land" else (t if t.endswith("s") else t + "s")
+        label = {"Land": "Lands", "Sorcery": "Sorceries"}.get(t, t if t.endswith("s") else t + "s")
         lines.append(f"{label}:")
         for qty, card in sorted(entries, key=lambda x: x[1].get("name", "").lower()):
             lines.extend(format_card_block(qty, card))
